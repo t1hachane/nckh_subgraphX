@@ -37,8 +37,8 @@ def pipeline(max_nodes):
                             f"{mcts_args.dataset_name}_"
                             f"{model_args.model_name}_"
                             f"{reward_args.reward_method}")
-    if not os.path.isdir(save_dir):
-        os.mkdir(save_dir)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
 
     fidelity_score_list = []
     sparsity_score_list = []
