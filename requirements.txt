@@ -1,0 +1,16 @@
+torch
+numpy
+pandas
+watermark
+matplotlib
+seaborn
+scikit-learn
+scipy
+captum
+ipython
+jupyter
+easydict
+torch-geometric
+tap
+typed-argument-parser==1.5.4
+rdkit
