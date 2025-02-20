@@ -164,6 +164,7 @@ class MCTS(object):
         return explanations
 
 
+# SỬA truyền vào những gì init của Explain
 class Explain(object):
 
     def __init__(self,
