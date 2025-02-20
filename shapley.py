@@ -47,6 +47,36 @@ def GnnNets_NC2value_func(gnnNets_NC, node_idx: Union[int, torch.tensor], target
             return score
     return value_func
 
+def GnnNets_Biomarkers2value_func(gnnNets, target_class, module_indices=None):
+    """Value function for gene module importance analysis
+    
+    Args:
+        gnnNets: The trained GNN model
+        target_class: Target cancer class/type
+        module_indices: Indices of genes in the module to analyze
+    
+    Returns:
+        value_func: Function that computes importance scores
+    """
+    def value_func(data):
+        with torch.no_grad():
+            # data.x shape: [batch_size, num_genes, gene_features]
+            logits, prob, _ = gnnNets(data)
+            
+            if module_indices is not None:
+                # For specific gene module analysis
+                batch_size = data.batch.max() + 1
+                # Reshape to [batch_size, num_genes, num_classes]
+                prob = prob.reshape(batch_size, -1, logits.shape[-1])
+                # Get probabilities for target class for specific gene module
+                score = prob[:, module_indices, target_class].mean(dim=1)
+            else:
+                # For whole sample analysis
+                score = prob[:, target_class]
+            
+        return score
+    return value_func
+
 
 def get_graph_build_func(build_method):
     if build_method.lower() == 'zero_filling':

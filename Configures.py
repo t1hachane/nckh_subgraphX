@@ -6,7 +6,7 @@ from typing import List
 
 class DataParser(Tap):
     dataset_name: str = 'bbbp'
-    dataset_dir: str = '/kaggle/input/mutag-subgraphx/datasets'
+    dataset_dir: str = 'datasets/'
     random_split: bool = True
     data_split_ratio: List = [0.8, 0.1, 0.1]   # the ratio of training, validation and testing set for random split
     seed: int = 1
@@ -23,7 +23,7 @@ class GATParser(Tap):           # hyper-parameter for gat model
 class ModelParser(GATParser):
     device_id: int = 0
     model_name: str = 'gcn'
-    checkpoint: str = '/kaggle/input/mutag-subgraphx'
+    checkpoint: str = 'checkpoint/'
     concate: bool = False                     # whether to concate the gnn features before mlp
     latent_dim: List[int] = [128, 128, 128]   # the hidden units for each gnn layer
     readout: 'str' = 'max'                    # the graph pooling method
@@ -38,7 +38,15 @@ class ModelParser(GATParser):
         if torch.cuda.is_available():
             self.device = torch.device('cuda', self.device_id)
         else:
-            pass
+            self.device = torch.device('cpu')
+            print("CUDA is not available. Using CPU instead.")
+
+        if self.model_name.lower() == 'gcn':
+            self.latent_dim = [20, 20, 20]  # Match checkpoint dimensions
+            self.mlp_hidden = []  # Adjust if needed
+            self.concate = True
+            self.adj_normlize = False
+            self.emb_normlize = True
 
 
 class MCTSParser(DataParser, ModelParser):
