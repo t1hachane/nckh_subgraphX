@@ -26,7 +26,7 @@ class MCTSNode(object):
         # ten cac node (cac feature duoc chon) cua subgraph thuoc node hien tai
         self.coalition = coalition
 
-        # input feature matrix ung voi cac feature duoc chon (cua benh nhan sample TCGA trong ma tran ban dau m sample x n gene)
+        # 3 input omic feature matrix ung voi cac feature duoc chon (cua benh nhan sample TCGA trong ma tran ban dau m sample x n gene)
         self.data = data
 
         # graph cua node cha thuoc node nay? hoac graph cua node goc
@@ -55,7 +55,15 @@ class MCTSNode(object):
     def size(self) -> int:
         return len(self.coalition)
     
-def get_best_mcts_node(results: List[MCTSNode], max_nodes: int) -> MCTSNode:
+def get_best_mcts_node(results, max_nodes):
+    '''
+    Input: 
+        results: List[MCTSNode]
+
+        max_nodes: int (the subgraphs may contain the maximum number of nodes that <= min_nodes (an predefined upper bound - like top 500 biomarkers) like 490) => can continue to get the subgraph with the number of nodes <= 300 for example (tiep tuc lay top 300 tu top 500 (490) da tim duoc)
+    Output: 
+        best_result: MCTSNode
+    '''
     results = [result for result in results if 2 <= result.size <= max_nodes]
     if len(results) == 0:
         raise ValueError(f'All subgraphs have more than {max_nodes} nodes.')
@@ -68,8 +76,8 @@ class MCTS(object):
     def __init__(self,
                  x: FloatTensor,
                  edge_index: LongTensor,
-                 model: torch.nn.Module,
-                 num_hops: int,
+                 model,
+                #  num_hops: int,
                  n_rollout: int,
                  min_nodes: int,
                  c_puct: float,
@@ -80,29 +88,40 @@ class MCTS(object):
                  ) -> None:
         self.x = x
         self.edge_index = edge_index
-        self.num_hops = num_hops # số lượng lớp trong mạng GNN
-
         self.model = model
-        self.data = Data(x=self.x, edge_index=self.edge_index)
-        self.graph = to_networkx(
-            Data(x=self.x, edge_index=remove_self_loops(self.edge_index)[0]),
-            to_undirected=True
-        )
 
-        self.data = Batch.from_data_list([self.data])
-        self.num_nodes = self.graph.number_of_nodes()
+        # self.num_hops = num_hops # số lượng lớp trong mạng GNN
+
+        '''
+            Hyperparameters
+            - min_nodes: trong 1 subgraph, khi subgraph có số node nhỏ hơn min_node thì dừng prune
+            - c_puct: hyperparameter lambda
+            - num_expand_nodes: con số k để chọn top k node with highest degrees xem xét prune
+
+        '''
         self.n_rollout = n_rollout
-        self.min_nodes = min_nodes # min node trong 1 subgraph, khi subgraph có số node nhỏ hơn min_node thì dừng prune
+        self.min_nodes = min_nodes 
         self.c_puct = c_puct
-        self.num_expand_nodes = num_expand_nodes # con số k để chọn top k node with highest degrees xem xét prune 
+        self.num_expand_nodes = num_expand_nodes  
         self.high2low = high2low 
+
+        self.data_train_list, self.data_all_list, self.idx_dict, self.labels = prepare_trte_data_tcga_mcts(data_folder, view_list)
+
+
+        self.adj_tr_list, self.adj_te_list = gen_trte_adj_mat(self.data_train_list, self.data_all_list, self.idx_dict, adj_parameter=10)
+
+        # dang hardcore la tim matrix cua omic 1
+        self.data = x 
+        self.graph = nx.from_numpy_array(self.adj_tr_list[0].to_dense().cpu().numpy())
+
+        # self.data = Batch.from_data_list([self.data])
+        self.num_nodes = self.graph.number_of_nodes()
 
         self.root_coalition = tuple(range(self.num_nodes))
         self.MCTSNodeClass = partial(MCTSNode, data=self.data, ori_graph=self.graph, c_puct=self.c_puct)
         self.root = self.MCTSNodeClass(coalition=self.root_coalition)
         self.state_map = {self.root.coalition: self.root}
-        self.data_train_list, self.data_all_list, self.idx_dict, self.labels = prepare_trte_data_tcga_mcts(data_folder, view_list)
-        self.adj_tr_list, self.adj_te_list = gen_trte_adj_mat(self.data_train_list, self.data_all_list, self.idx_dict, adj_parameter=10)
+
 
     def mcts_rollout(self, tree_node: MCTSNode) -> float:
         if len(tree_node.coalition) <= self.min_nodes:
@@ -144,7 +163,7 @@ class MCTS(object):
 
             for child in tree_node.children:
                 if child.P == 0:
-                    child.P = gnn_score(self.data_all_list, self.adj_tr_list, self.idx_dict, self.labels, coalition=child.coalition, data=child.data, model=self.model)
+                    child.P = gnn_score(self.data_all_list, self.adj_tr_list, self.idx_dict, model_dict=self.model, coalition=child.coalition, data=child.data, target_class=self.labels)
 
         sum_count = sum(child.N for child in tree_node.children)
         selected_node = max(tree_node.children, key=lambda x: x.Q() + x.U(n=sum_count))
@@ -166,21 +185,21 @@ class MCTS(object):
 
 # SỬA truyền vào những gì init của Explain
 class Explain(object):
-
     def __init__(self,
-                 model: torch.nn.Module,
-                 num_hops: Optional[int] = None,
-                 n_rollout: int = 20,
-                 min_nodes: int = 5,
+                 model,
+                #  num_hops: int,
+                 n_rollout: int = 3,
+                 min_nodes: int = 500,
                  c_puct: float = 10.0,
                  num_expand_nodes: int = 14,
-                 high2low: bool = False) -> None:
+                 high2low: bool = False):
         self.model = model
-        self.model.eval()
-        self.num_hops = num_hops
+        for m in self.model:
+            self.model[m].eval()
+        # self.num_hops = num_hops
 
-        if self.num_hops is None:
-            self.num_hops = sum(isinstance(module, MessagePassing) for module in self.model.modules())
+        # if self.num_hops is None:
+        #     self.num_hops = sum(isinstance(module, MessagePassing) for module in self.model.modules())
 
         # MCTS hyperparameters
         self.n_rollout = n_rollout
@@ -189,24 +208,41 @@ class Explain(object):
         self.num_expand_nodes = num_expand_nodes
         self.high2low = high2low
 
-    def explain(self, x: Tensor, edge_index: Tensor, max_nodes: int) -> MCTSNode:
-        # Create an MCTS object with the provided graph
+    def explain(self, x, edge_index, max_nodes, data_folder, view_list):
+        '''
+        Input: 
+            x: tensor m x n matrix (m patients, n genes)
+
+            edge_index: tensor 2 x m matrix (m edges)
+
+            max_nodes: int for def get_best_mcts_node(results, max_nodes)
+
+            data_folder: str
+
+            view_list: list
+        Output: 
+            MCTSNode
+        '''
+        
         mcts = MCTS(
             x=x,
             edge_index=edge_index,
             model=self.model,
-            num_hops=self.num_hops,
+            # num_hops=self.num_hops,
             n_rollout=self.n_rollout,
             min_nodes=self.min_nodes,
             c_puct=self.c_puct,
             num_expand_nodes=self.num_expand_nodes,
-            high2low=self.high2low
+            high2low=self.high2low,
+
+            data_folder=data_folder,
+            view_list=view_list
         )
 
         # Run the MCTS search
         mcts_nodes = mcts.run_mcts()
-        # such that the subgraph has at most max_nodes nodes
+
+        # select the subgraph that has at most max_nodes nodes
         best_mcts_node = get_best_mcts_node(mcts_nodes, max_nodes=max_nodes)
 
-        print(type(best_mcts_node.coalition))
         return best_mcts_node

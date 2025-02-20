@@ -18,10 +18,17 @@ def init_model_dict(num_view, num_class, dim_list, dim_he_list, dim_hc, gcn_dopo
     return model_dict
 
 def load_model_dict(folder, model_dict):
+    device = torch.device("cuda" if cuda else "cpu")
     for module in model_dict:
         if os.path.exists(os.path.join(folder, module+".pth")):
-#            print("Module {:} loaded!".format(module))
-            model_dict[module].load_state_dict(torch.load(os.path.join(folder, module+".pth"), map_location="cuda:{:}".format(torch.cuda.current_device())))
+#            print("Module {:} loaded!".format(module)) 
+            if device.type == 'cuda':
+                model_dict[module].load_state_dict(torch.load(os.path.join(folder, module+".pth"), map_location="cuda:{:}".format(torch.cuda.current_device())))
+            else: 
+                model_dict[module].load_state_dict(
+                    torch.load(os.path.join(folder, module+".pth"), 
+                             map_location='cpu')
+                )
         else:
             print("WARNING: Module {:} from model_dict is not loaded!".format(module))
         if cuda:
@@ -127,4 +134,4 @@ def cal_adj_mat_parameter(edge_per_node, data, metric="cosine"):
     assert metric == "cosine", "Only cosine distance implemented"
     dist = cosine_distance_torch(data, data)
     parameter = torch.sort(dist.reshape(-1,)).values[edge_per_node*data.shape[0]]
-    return np.asscalar(parameter.data.cpu().numpy())
+    return parameter.data.cpu().numpy().item()

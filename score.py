@@ -3,10 +3,12 @@ import torch
 from torch_geometric.data import Batch, Data
 from utils import *
 
-def gnn_score(data_all_list, adj_tr_list, te_idx, model_dict, coalition: Tuple[int, ...], data: Data, model: torch.nn.Module, target_class: torch.tensor) -> float:
+def gnn_score(data_all_list, adj_tr_list, te_idx, model_dict, coalition: Tuple[int, ...], data: Data, target_class: torch.tensor) -> float:
     print(f'Coalition: {coalition}')
-    node_mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=data.x.device)
-    node_mask[list(coalition)] = 1
+    node_mask = torch.zeros(len(coalition), dtype=torch.bool, device='cpu')
+    print(node_mask.shape)
+    coalition_tmp = [i - 1 for i in coalition]
+    node_mask[coalition_tmp] = 1
 
     row, col = data.edge_index
     edge_mask = (node_mask[row] == 1) & (node_mask[col] == 1)
