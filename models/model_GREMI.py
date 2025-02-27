@@ -1,14 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Adam
-from torch_geometric.nn import global_mean_pool as gap
-from torch.nn import LayerNorm, Parameter
-from torch.nn import init, Parameter
-import torch.optim.lr_scheduler as lr_scheduler
-from typing import Dict
 
-from utils import *
+from utils_model import define_act_layer
 
 
 def xavier_init(m):
@@ -28,11 +22,11 @@ class LinearLayer(nn.Module):
         return x
 
 class Fusion(nn.Module):
-    def __init__(self, num_class, num_views, hidden_dim, dropout, in_dim):
+    def __init__(self, num_class, num_views, hidden_dim, dropout, in_dim, dim1, dim2, dim3, alpha=0.5):
         super().__init__()
-        self.gat1 = GAT(dropout=0.2, alpha=0.6, dim=200)
-        self.gat2 = GAT(dropout=0.2, alpha=0.6, dim=200)
-        self.gat3 = GAT(dropout=0.2, alpha=0.6, dim=200)
+        self.gat1 = GAT(dropout=0.5, alpha=alpha, dim=dim1)
+        self.gat2 = GAT(dropout=0.5, alpha=alpha, dim=dim2)
+        self.gat3 = GAT(dropout=0.5, alpha=alpha, dim=dim3)
 
         self.views = len(in_dim)
         self.classes = num_class
@@ -56,6 +50,8 @@ class Fusion(nn.Module):
 
 
     def forward(self, omic1, omic2, omic3, adj1, adj2, adj3, label=None, infer=False):
+        # print(omic1.shape, omic2.shape, omic3.shape)
+        # print(adj1.shape, adj2.shape, adj3.shape)
         output1, gat_output1 = self.gat1(omic1, adj1)
         output2, gat_output2 = self.gat2(omic2, adj2)
         output3, gat_output3 = self.gat3(omic3, adj3)
@@ -94,12 +90,19 @@ class Fusion(nn.Module):
         return MMLoss, MMlogit, gat_output1, gat_output2, gat_output3, output1, output2, output3
 
     def infer(self, omic1, omic2, omic3, adj1, adj2, adj3):
-        MMlogit = self.forward(omic1, omic2, omic3, adj1, adj2, adj3, infer=True)
-        return MMlogit
+        with torch.no_grad():  # Prevent gradient storage
+            MMlogit = self.forward(omic1, omic2, omic3, adj1, adj2, adj3, infer=True)
+            result = MMlogit.detach().clone()  # Clone to detach from computation graph
+    
+        # Explicitly clean up tensors
+        del MMlogit
+        torch.cuda.empty_cache()  # Force CUDA memory cleanup if using GPU
+    
+        return result
 
 
 class GAT(nn.Module):
-    def __init__(self, dropout, alpha, dim):
+    def __init__(self, dropout, alpha, dim, input_dim=700):
 
         super(GAT, self).__init__()
         self.dropout = dropout
@@ -159,7 +162,7 @@ class GAT(nn.Module):
         self.fc4.apply(xavier_init)
 
         self.fc5 = nn.Sequential(
-            nn.Linear(self.fc_dim[3], 2))
+            nn.Linear(self.fc_dim[3], 4))
         self.fc5.apply(xavier_init)
 
     def forward(self, x, adj):
@@ -214,21 +217,47 @@ class GraphAttentionLayer(nn.Module):
         h = torch.matmul(input, self.W)
         bs, N, _ = h.size()
 
-        a_input = torch.cat([h.repeat(1, 1, N).view(bs, N * N, -1), h.repeat(1, N, 1)], dim=-1).view(bs, N, -1,
-                                                                                                     2 * self.out_features)
-
-        e = self.leakyrelu(torch.matmul(a_input, self.a).squeeze(3))
-
-        batch_adj = torch.unsqueeze(adj, 0).repeat(bs, 1, 1)
-
-
-        zero_vec = -9e15 * torch.ones_like(e)
-        attention = torch.where(batch_adj > 0, e, zero_vec)
-        attention = self.dropout_layer(F.softmax(attention, dim=-1))  # [bs, N, N]
-        # print("attention shape:", attention.shape)
-        h_prime = torch.bmm(attention, h)  # [bs, N, F]
-        # print("h_prime:", h_prime.shape)
-
+        attention = torch.zeros(bs, N, N, device=h.device)
+        chunk_size = 50  # Adjust based on your memory constraints
+        
+        for i in range(0, N, chunk_size):
+            end_i = min(i + chunk_size, N)
+            
+            # Compute attention for this chunk
+            for j in range(0, N, chunk_size):
+                end_j = min(j + chunk_size, N)
+                
+                # Get features for nodes i and j
+                h_i = h[:, i:end_i, :]  # [bs, chunk, out_features]
+                h_j = h[:, j:end_j, :]  # [bs, chunk, out_features]
+                
+                # Compute attention coefficients
+                h_i_expanded = h_i.unsqueeze(2).expand(-1, -1, end_j-j, -1)  # [bs, chunk_i, chunk_j, out_features]
+                h_j_expanded = h_j.unsqueeze(1).expand(-1, end_i-i, -1, -1)  # [bs, chunk_i, chunk_j, out_features]
+                
+                # Concatenate features
+                a_input = torch.cat([h_i_expanded, h_j_expanded], dim=-1)  # [bs, chunk_i, chunk_j, 2*out_features]
+                
+                # Compute attention scores
+                e = self.leakyrelu(torch.matmul(a_input, self.a).squeeze(-1))  # [bs, chunk_i, chunk_j]
+                
+                # Apply adjacency mask
+                adj_chunk = adj[i:end_i, j:end_j].unsqueeze(0).expand(bs, -1, -1)  # [bs, chunk_i, chunk_j]
+                
+                # Set attention to zero for non-connected nodes
+                zero_vec = -9e15 * torch.ones_like(e)
+                e_masked = torch.where(adj_chunk > 0, e, zero_vec)
+                
+                # Store in the attention matrix
+                attention[:, i:end_i, j:end_j] = e_masked
+        
+        # Apply softmax along the last dimension
+        attention = F.softmax(attention, dim=-1)
+        attention = self.dropout_layer(attention)
+        
+        # Compute output features using attention weights
+        h_prime = torch.bmm(attention, h)  # [bs, N, out_features]
+        
         if self.concat:
             return F.elu(h_prime)
         else:

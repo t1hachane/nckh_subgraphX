@@ -124,6 +124,7 @@ class MCTS(object):
         self.state_map = {self.root.coalition: self.root}
 
     def mcts_rollout(self, tree_node: MCTSNode) -> float:
+        print("MCTS_rollout", self.root_coalition)
         if len(tree_node.coalition) <= self.min_nodes:
             return tree_node.P
         if len(tree_node.children) == 0:
@@ -147,6 +148,7 @@ class MCTS(object):
                 new_node = self.state_map.setdefault(new_coalition, self.MCTSNodeClass(coalition=new_coalition))
                 if new_coalition not in tree_children_coalitions:
                     tree_node.children.append(new_node)
+                    # print("New coalition: ", new_coalition)
                     tree_children_coalitions.add(new_coalition)
 
             for child in tree_node.children:
@@ -211,7 +213,6 @@ class Explain(object):
 
         # Run the MCTS search
         mcts_nodes = mcts.run_mcts()
-        print(len(mcts_nodes))
         # such that the subgraph has at most max_nodes nodes
         best_mcts_node = get_best_mcts_node(mcts_nodes, max_nodes=max_nodes)
 

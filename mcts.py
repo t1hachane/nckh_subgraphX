@@ -6,7 +6,6 @@ from score import gnn_score
 from load_dataset import *
 
 import networkx as nx
-import torch
 from sklearn.metrics import accuracy_score, roc_auc_score
 from torch import FloatTensor, LongTensor, Tensor
 from torch_geometric.data import Batch, Data
@@ -17,33 +16,43 @@ from tqdm.notebook import trange
 class MCTSNode(object):
     def __init__(self,
                  coalition: Tuple[int, ...],
-                 data: Data,
+                #  omics_datas: List[FloatTensor],
                  ori_graph: nx.Graph,
-                 c_puct: float,
+                 c_puct: float = 10.0,
                  W: float = 0,
                  N: int = 0,
-                 P: float = 0) -> None:
-        # ten cac node (cac feature duoc chon) cua subgraph thuoc node hien tai
+                 P: float = 0):
+        '''
+        Input:
+            coalition: Tuple[int, ...] (tập index của các node trong graph hiện tại của node này index so với 2000 gene)
+            omics_datas: [list tensor 3 ma trận omics]
+            ori_graph: nx.Graph graph gốc của node này (trước khi bị prune thành một subgraph khác cho childnode)
+            c_puct: float
+            W: float
+            N: int
+            P: float (immediate reward)
+        '''
+
+        assert isinstance(coalition, tuple), f"coalition must be a tuple, not {type(coalition)}"
+
+        # assert isinstance(omics_datas, list), f"omics_datas must be a list, not {type(omics_datas)}"
+
+        assert isinstance(ori_graph, nx.Graph), f"ori_graph must be a nx.Graph, not {type(ori_graph)}"
+
         self.coalition = coalition
+        # self.omics_data = omics_datas
 
-        # 3 input omic feature matrix ung voi cac feature duoc chon (cua benh nhan sample TCGA trong ma tran ban dau m sample x n gene)
-        self.data = data
-
-        # graph cua node cha thuoc node nay? hoac graph cua node goc
         self.ori_graph = ori_graph
-
-        # hyper parameter lamda
         self.c_puct = c_puct
-
-        # tong reward cua cac subgraph cua node con cua node hien tai
         self.W = W
-
-        # so lan node nay duoc tham/chon
         self.N = N
-
-        # reward cua node hien tai
-        self.P = P # Immediate reward
+        self.P = P
         self.children: List[MCTSNode] = []
+
+        # # zero out the features of the nodes that are not in the coalition 
+        # # dang hardcore la omic 1
+        # self.omics_data[0] = self.omics_data[0].clone()
+        # self.omics_data[0][list(set(range(2000)) - set(coalition))] = 0
 
     def Q(self) -> float:
         return self.W / self.N if self.N > 0 else 0.0
@@ -54,6 +63,7 @@ class MCTSNode(object):
     @property
     def size(self) -> int:
         return len(self.coalition)
+
     
 def get_best_mcts_node(results, max_nodes):
     '''
@@ -74,9 +84,10 @@ def get_best_mcts_node(results, max_nodes):
 
 class MCTS(object):
     def __init__(self,
-                 x: FloatTensor,
+                #  omics_datas_orig: List[FloatTensor],
                  edge_index: LongTensor,
-                 model,
+                 model_dict: Dict[str, Any],
+                 adj_tr_list,
                 #  num_hops: int,
                  n_rollout: int,
                  min_nodes: int,
@@ -85,13 +96,24 @@ class MCTS(object):
                  high2low: bool,
                  data_folder: str,
                  view_list: list,
-                 ) -> None:
-        self.x = x
+                 ):
+        '''
+        Input:
+            omics_datas_orig: [list tensor 3 ma trận omics] ban đầu chưa bị zero out feature nào
+
+
+        '''
+        # assert isinstance(omics_datas_orig, list), f"omics_datas must be a list, not {type(omics_datas_orig)}"
+        assert isinstance(edge_index, LongTensor), f"edge_index must be a 2D LongTensor, not {type(edge_index)}"
+        # assert isinstance(model_dict, dict), f"model_dict must be a dict, not {type(model_dict)}"
+
+        assert edge_index.size(0) == 2, f"edge_index must have 2 rows, got {edge_index.size(0)}"
+
+
+        # self.omics_datas_orig = omics_datas_orig
         self.edge_index = edge_index
-        self.model = model
-
+        self.model_dict = model_dict
         # self.num_hops = num_hops # số lượng lớp trong mạng GNN
-
         '''
             Hyperparameters
             - min_nodes: trong 1 subgraph, khi subgraph có số node nhỏ hơn min_node thì dừng prune
@@ -108,24 +130,31 @@ class MCTS(object):
         self.data_train_list, self.data_all_list, self.idx_dict, self.labels = prepare_trte_data_tcga_mcts(data_folder, view_list)
 
 
-        self.adj_tr_list, self.adj_te_list = gen_trte_adj_mat(self.data_train_list, self.data_all_list, self.idx_dict, adj_parameter=10)
+        # self.adj_tr_list, self.adj_te_list = gen_trte_adj_mat(self.data_train_list, self.data_all_list, self.idx_dict, adj_parameter=10)
+        self.adj_tr_list = adj_tr_list
 
-        # dang hardcore la tim matrix cua omic 1
-        self.data = x 
         self.graph = nx.from_numpy_array(self.adj_tr_list[0].to_dense().cpu().numpy())
-
-        # self.data = Batch.from_data_list([self.data])
         self.num_nodes = self.graph.number_of_nodes()
 
         self.root_coalition = tuple(range(self.num_nodes))
-        self.MCTSNodeClass = partial(MCTSNode, data=self.data, ori_graph=self.graph, c_puct=self.c_puct)
+        self.MCTSNodeClass = partial(MCTSNode,
+                                    #  omics_datas=self.omics_datas_orig, 
+                                     ori_graph=self.graph, 
+                                     c_puct=self.c_puct)
+
+        
         self.root = self.MCTSNodeClass(coalition=self.root_coalition)
         self.state_map = {self.root.coalition: self.root}
 
 
     def mcts_rollout(self, tree_node: MCTSNode) -> float:
+        assert isinstance(tree_node, MCTSNode), f"tree_node must be a MCTSNode, not {type(tree_node)}"
+
         if len(tree_node.coalition) <= self.min_nodes:
+            print(f"len(tree_node.coalition) = {len(tree_node.coalition)}")
+            print(tree_node.coalition)
             return tree_node.P
+        
         if len(tree_node.children) == 0:
             tree_children_coalitions = set()
             tree_subgraph = self.graph.subgraph(tree_node.coalition)
@@ -139,9 +168,12 @@ class MCTS(object):
 
             # top k node xem xét để bỏ (bị prune)
             for expand_node in expand_nodes:
-
+                print("EXPAND_NODE", expand_node)
                 # tạo 1 subgraph mới -> có thể có nhiều thành phần liên thông -> nên mới được gọi là subgraph_coalition
                 subgraph_coalition = all_nodes_set - {expand_node}
+
+                print("ALL_NODES_SET", len(all_nodes_set))
+                print(f"SUBGRAPH_COALITION, {len(subgraph_coalition)}")
 
                 # số lượng connected component còn lại khi xóa bỏ each_node và cạnh liên kết với each_node -> tập các subgraph nên mới có chữ s
                 subgraphs = (
@@ -157,13 +189,20 @@ class MCTS(object):
 
                 # tạo 1 node mới từ subgraph mới
                 new_node = self.state_map.setdefault(new_coalition, self.MCTSNodeClass(coalition=new_coalition))
+
+                # xoa bo di 2 not nhung cung co the dem toi 1 connected component giong nhau => vi chon component lon nhat trong cac thanh phan lien thong sau khi xoa di 2 not do => khong phai node nao cung co k con => co toi da k con
                 if new_coalition not in tree_children_coalitions:
                     tree_node.children.append(new_node)
+                    # print(f"new_node.coalition, {new_node.coalition}")
                     tree_children_coalitions.add(new_coalition)
 
             for child in tree_node.children:
                 if child.P == 0:
-                    child.P = gnn_score(self.data_all_list, self.adj_tr_list, self.idx_dict, model_dict=self.model, coalition=child.coalition, data=child.data, target_class=self.labels)
+                    child.P = gnn_score(self.data_train_list, self.adj_tr_list, 
+                    self.idx_dict, 
+                    model_dict=self.model_dict, coalition=child.coalition, 
+                    # data=child.omics_data, 
+                    target_class=self.labels)
 
         sum_count = sum(child.N for child in tree_node.children)
         selected_node = max(tree_node.children, key=lambda x: x.Q() + x.U(n=sum_count))
@@ -179,23 +218,23 @@ class MCTS(object):
 
         explanations = [node for _, node in self.state_map.items()]
         explanations = sorted(explanations, key=lambda x: (x.P, -x.size), reverse=True)
-        print(len(explanations))
         return explanations
 
 
 # SỬA truyền vào những gì init của Explain
 class Explain(object):
     def __init__(self,
-                 model,
+                 model_dict,
+                 adj_tr_list,
                 #  num_hops: int,
                  n_rollout: int = 3,
                  min_nodes: int = 500,
                  c_puct: float = 10.0,
                  num_expand_nodes: int = 14,
                  high2low: bool = False):
-        self.model = model
-        for m in self.model:
-            self.model[m].eval()
+        self.model_dict = model_dict
+        self.adj_tr_list = adj_tr_list
+        # self.model_dict.eval()
         # self.num_hops = num_hops
 
         # if self.num_hops is None:
@@ -208,7 +247,7 @@ class Explain(object):
         self.num_expand_nodes = num_expand_nodes
         self.high2low = high2low
 
-    def explain(self, x, edge_index, max_nodes, data_folder, view_list):
+    def explain(self, edge_index, max_nodes, data_folder, view_list):
         '''
         Input: 
             x: tensor m x n matrix (m patients, n genes)
@@ -223,11 +262,10 @@ class Explain(object):
         Output: 
             MCTSNode
         '''
-        
         mcts = MCTS(
-            x=x,
             edge_index=edge_index,
-            model=self.model,
+            model_dict=self.model_dict,
+            adj_tr_list=self.adj_tr_list,
             # num_hops=self.num_hops,
             n_rollout=self.n_rollout,
             min_nodes=self.min_nodes,

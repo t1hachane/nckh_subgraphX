@@ -12,7 +12,6 @@ def prepare_trte_data_tcga_mcts(data_folder, view_list, postfix_tr='_tr', postfi
     # load train, test data
     num_view = len(view_list)
     # begin: need to fix
-    print(data_folder)
     labels_tr = np.loadtxt(os.path.join(data_folder, f"labels{postfix_tr}.csv"), delimiter=',')
     labels_te = np.loadtxt(os.path.join(data_folder, f"labels{postfix_te}.csv"), delimiter=',')
     labels_tr = labels_tr.astype(int)
